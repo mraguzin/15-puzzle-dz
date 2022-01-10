@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+
+<head>
+    <meta charset="utf-8">
+    <title>Generalizirana slagalica</title>
+    <style>
+        body,
+        html {
+            height: 100%;
+            max-width: 1280px;
+            margin: auto;
+        }
+
+        .header {
+            width: 100%;
+        }
+
+        table,
+        tr,
+        td {
+            height: 100%;
+            width: 100%;
+            border: 2px solid lightgray;
+            border-collapse: collapse;
+        }
+
+        tr,
+        td {
+            height: 33.33%;
+            width: 33.33%;
+        }
+
+        .tile {
+            text-align: center;
+            font-weight: bold;
+            font-size: 10em;
+        }
+        
+        .tile.change:after {
+            content: attr(data-content);
+        }
+
+        #arena {
+            height: 1024px;
+            width: 1024px;
+        }
+    </style>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+    <script src="permutation.js"></script>
+
+    <script type="module">
+        import {FibonacciHeap} from './fibonacciHeap.js';
+
+        var Game = function (boardDim) {
+
+            const numTiles = boardDim * boardDim;
+            let permutation = [];
+            let timeoutID;
+
+            for (let i = 0; i < numTiles; ++i) {
+                permutation.push(i);
+            }
+
+            const GOAL_STATE = permutation.concat([]);
+            const SPOT = numTiles - 1;
+            let offsets = [];
+
+            for (let i = 0; i < boardDim; ++i) {
+                for (let j = 0; j < boardDim; ++j) {
+                    let moves = [];
+                    
+                    if (j !== 0) {
+                        moves.push(-1);
+                    }
+
+                    if (j !== boardDim - 1) {
+                        moves.push(1);
+                    }
+
+                    if (i !== 0) {
+                        moves.push(-boardDim);
+                    }
+
+                    if (i !== boardDim - 1) {
+                        moves.push(boardDim);
+                    }
+
+                    offsets.push(moves);
+                }
+            }
+            console.log(offsets);
+
+            let vacantPos = numTiles - 1;
+            let playable = false;
+
+            this.heuristics = [];
+            function L0 (s) {
+                let score = 0;
+                for (let i = 0; i <= SPOT; ++i) {
+                    if (s[i] !== GOAL_STATE[i]) {
+                        ++score;
+                    }
+                }
+
+                return score;
+            }
+
+            this.heuristics['L0'] = L0;
+
+            function L1(s) {
+                let score = 0;
+                for (let i = 0; i <= SPOT; ++i) {
+                    const xy = getXY(s[i]);
+                    const goalXY = getXY(GOAL_STATE[i]);
+                    score += getDistance(xy, goalXY);
+                }
+
+                return score;
+            }
+
+            this.heuristics['L1'] = L1;
+
+            this.heuristics['0'] = function (s) {
+                return 0;
+            }
+
+            function Gaschnig (s) {
+                let state = [...s];
+                let score = 0;
+                let blank = s.indexOf(SPOT);
+                let misplaced;
+
+                while ((misplaced = getMisplacedTilePos(state)) !== null) {
+                    if (GOAL_STATE[blank] !== SPOT) {
+                        let pos = state.indexOf(GOAL_STATE[blank]);
+                        [state[pos], state[blank]] = [state[blank], state[pos]];
+                        blank = pos;
+                    } else {
+                        [state[misplaced], state[blank]] = [state[blank], state[misplaced]];
+                        blank = misplaced;
+                    }
+
+                    ++score;
+                }
+
+                return score;
+            }
+
+            this.heuristics['Gaschnig'] = Gaschnig;
+
+            function Nilsson (s) { // Problem solving methods in artificial intelligence p66
+                let P = L1(s);
+
+                let S = 1;
+                for (let i = 0; i < SPOT; ++i) {
+                    if (s[i] !== s[i + 1] - 1) {
+                        S += 2;
+                    }
+                }
+
+                return P + 3 * S;
+            }
+
+            this.heuristics['Nilsson'] = Nilsson;
+
+            function numLineConflicts(s, rowcol, isRow) {
+                let current = [];
+                let goal = [];
+
+                for (let i = 0; i < boardDim; ++i) {
+                    let idx;
+                    if (isRow) {
+                        idx = rowcol * boardDim + i;
+                    } else {
+                        idx = i * boardDim + rowcol;
+                    }
+
+                    current.push(s[idx]);
+                    goal.push(GOAL_STATE[idx]);
+                }
+
+                let inversions = 0;
+                for (let i = 1; i < boardDim; ++i) {
+                    if (current[i] !== SPOT && goal.indexOf(current[i]) !== 0) {
+                        for (let j = 0; j < i; ++j) {
+                            if (current[j] !== SPOT && goal.indexOf(current[j]) !== 0) {
+                                if ((current[i] < current[j]) !== (i < j)) { // TODO: nlogn inversion test?
+                                    ++inversions;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return inversions;
+            }
+
+            function LC (s) {
+                let lcRow = 0;
+                let lcCol = 0;
+                
+                for (let i = 0; i < boardDim; ++i) {
+                    lcRow += numLineConflicts(s, i, true);
+                    lcCol += numLineConflicts(s, i, false);
+                }
+
+                let LC = 2 * (lcRow + lcCol);
+                let MD = L1(s);
+
+                return MD + LC;
+            }
+
+            this.heuristics['LC'] = LC;
+
+            this.heuristics['max'] = function (s) {
+                return Math.max(LC(s), Nilsson(s), Gaschnig(s), L1(s), L0(s));
+            }
+
+             this.updateTiles = function (positions) {
+                 if (!arguments.length) {
+                     positions = GOAL_STATE;
+                 }
+
+                for (const pos of positions) {
+                    let element = $(`#t${pos}`);
+                    if (permutation[pos] !== SPOT) {
+                        element.addClass("change").attr("data-content", permutation[pos] + 1);
+                    } else {
+                        element.addClass("change").attr("data-content", "");
+                    }
+                }
+
+            };
+
+            function isGoalState(state) {
+                for (let i = 0; i <= SPOT; i++) {
+                    if (state[i] !== GOAL_STATE[i]) {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            function getMisplacedTilePos(state) {
+                for (let i = 0; i <= SPOT; i++) {
+                    if (state[i] !== GOAL_STATE[i]) {
+                        return i;
+                    }
+                }
+
+                return null;
+            }
+
+            function checkEndgame() {
+                if (isGoalState(permutation)) {
+                    playable = false;
+                    alert('Slagalica složena');
+                }
+            }
+
+            function getDistance(pos0, pos1) {
+                return Math.abs(pos0[0] - pos1[0]) + Math.abs(pos0[1] - pos1[1]);
+            }
+
+            function getXY(tileIndex) {
+                const x = tileIndex % boardDim;
+                const y = (tileIndex / boardDim) >> 0;
+
+                return [x, y];
+            }
+
+
+            this.startGame = function () {
+                permutation = randomEvenPermutation(SPOT).concat([SPOT]);
+                playable = true;
+                vacantPos = SPOT;
+                this.updateTiles(GOAL_STATE);
+
+                checkEndgame();
+
+                $(".tile").click(function (event) {
+                    const pos = parseInt(event.target.id.slice(1));
+                    const xy1 = getXY(pos);
+                    const xy2 = getXY(vacantPos);
+
+                    if (playable && getDistance(xy1, xy2) === 1) {                        
+                        [permutation[vacantPos], permutation[pos]] = [permutation[pos], permutation[vacantPos]];
+
+                        game.updateTiles([vacantPos, pos]);
+                        vacantPos = pos;
+                        checkEndgame();
+                    }
+                });
+            };
+
+            function resetControls(controls, solveBtn, stats, text) {
+                clearInterval(timeoutID);
+                controls.prop('disabled', false);
+                solveBtn.text(text);
+                timeoutID = null;
+                vacantPos = permutation.indexOf(SPOT);
+                //stats.prop('hidden', true);
+            }
+
+            this.solve = function (heuristic) {
+                let controls = $('button:not(#solve),select');
+                let solveBtn = $('#solve');
+                let stats = $('.stats').prop('hidden', false);
+                let steps = $('#steps');
+
+                if (timeoutID) {
+                    playable = true;
+                    resetControls(controls, solveBtn, stats, 'Solve');
+                    return;
+                }
+
+                playable = false;
+                const gen = aStarSearch(permutation, heuristic);
+
+                controls.prop('disabled', true);
+                solveBtn.text('🛑');
+
+                timeoutID = setInterval(() => {
+                    const result = gen.next();
+
+                    if (!result.value) {
+                        alert('Nerješiva slagalica!');
+                        playable = true;
+                        resetControls(controls, solveBtn, stats, 'Solve');
+                        return;
+                    }
+
+                    permutation = state(result.value[1]);
+                    steps.text(result.value[0]);
+                    playable = result.done;
+                    if (result.done) {
+                        resetControls(controls, solveBtn, stats, 'Solve');
+                        plotPath(path(result.value[1]));
+                    }
+                }, 0);
+            }
+
+            this.solveRBFS = function (heuristic) {
+                console.log([permutation, 0, heuristic(permutation)]);
+                const result = RBFS([permutation, 0, heuristic(permutation)], 100000, heuristic);
+                if (!result[0]) {
+                    alert('Nerješiva slagalica!');
+                }
+
+                permutation = result[0][1];
+                this.updateTiles();
+            }
+
+            this.solveRBFS_g = function (heuristic) {
+                let controls = $('button:not(#solveRBFS),select');
+                let solveBtn = $('#solveRBFS');
+                let stats = $('.stats').prop('hidden', false);
+                let steps = $('#steps');
+
+                if (timeoutID) {
+                    playable = true;
+                    resetControls(controls, solveBtn, stats, 'Solve (RBFS)');
+                    return;
+                }
+
+                playable = false;
+                let stepMax = 0;
+
+                controls.prop('disabled', true);
+                solveBtn.text('🛑');
+
+                const gen = RBFS([permutation, 0, null, heuristic(permutation)], 100000, heuristic);
+                timeoutID = setInterval(() => {
+                    const result = gen.next();
+
+                    if (result.done && result.value && (!result.value[0])) {
+                        alert('Nerješiva slagalica!');
+                        resetControls(controls, solveBtn, stats, 'Solve (RBFS)');
+                        return;
+                    } else if (!result || !result.value) {
+                        return;
+                    }
+
+                    permutation = state(result.value[0]);
+                    steps.text(result.value[2]);
+                    playable = result.done;
+                    if (result.done) {
+                        resetControls(controls, solveBtn, stats, 'Solve (RBFS)');
+                        let trace = path(result.value[0]);
+                        plotPath(trace);
+                    }
+                }, 0);
+            }
+
+            function path(node) {
+                let s = [];
+                for (let i = 0; i < numTiles; ++i) {
+                    s.push(state(node)[i] + 1);
+                }
+
+                if (parent(node) === null) {
+                    return [s];
+                }
+
+                let arr = path(parent(node));
+                arr.push(s);
+                return arr;
+            }
+
+            function plotPath(trace) {
+                let text = 'Duljina: ' + trace.length + '<br>';
+                for (const p of trace) {
+                    text += p.toString() + "<br>";
+                }
+
+                $('#path').html(text);
+            }
+
+            function getPosXY(state) {
+                const pos = state.indexOf(SPOT);
+                
+                return [pos, getXY(pos)];
+            }
+
+            function succ(state) {
+                let res = [];
+                let x, y;
+
+                const pos = state.indexOf(SPOT);
+
+                for (const offset of offsets[pos]) {
+                    let tmp = [...state];
+                    [tmp[pos + offset], tmp[pos]] = [tmp[pos], tmp[pos + offset]];
+                    res.push(tmp);
+                }
+
+                return res;
+            }
+
+            function state(node) {
+                return node[0];
+            }
+
+            function cost(node) {
+                return node[1];
+            }
+
+            function parent(node) {
+                return node[2];
+            }
+
+            function initial(s0) {
+                return [s0, 0, null];
+            }
+
+            function expand(node) {
+                let res = [];
+
+                for (const s of succ(state(node))) {
+                    res.push([s, cost(node) + 1, node]);
+                }
+
+                return res;
+            }
+
+            function partition(arr, left, right) {
+                let pivot = arr[right][3];
+                let start = left;
+                
+                for (let i = left; i <= right; ++i) {
+                    if (arr[i][3] < pivot) {
+                        let tmp = arr[i];
+                        arr[i] = arr[start];
+                        arr[start++] = tmp;
+                    }
+                }
+
+                let tmp = arr[right];
+                arr[right] = arr[start];
+                arr[start] = tmp;
+
+                return start;
+            }
+
+            function quickselect(arr, left, right, k) {
+                if (left === right) {
+                    return arr[left];
+                }
+
+                let pivot = partition(arr, left, right);
+                if (pivot === k - 1) {
+                    return arr[pivot];
+                } else if (pivot < k - 1) {
+                    return quickselect(arr, pivot + 1, right, k);
+                } else {
+                    return quickselect(arr, left, pivot - 1, k);
+                }
+            }
+
+            function* RBFS(node, fLimit, h, steps = 0) {
+                let successors = [];
+
+                yield [node, 0, steps];
+                if (isGoalState(state(node))) {
+                    return [node, fLimit, steps];
+                }
+
+                for (let child of expand(node)) {
+                    //successors.push(child);
+                    child[3] = Math.max(cost(child) + h(state(child)), node[3]);
+                    successors.push(child);
+                }
+
+                if (successors.length === 0) {
+                    return [false, 100000, steps];
+                }
+
+                // for (let s of successors) {
+                //     s[3] = Math.max(cost(s) + h(state(s)), node[3]);
+                // }
+
+                while (1) {
+                    let best = quickselect(successors, 0, successors.length - 1, 1);
+                    if (best[3] > fLimit) {
+                        return [false, best[3], steps];
+                    }
+
+                    let alternative = quickselect(successors, 0, successors.length - 1, 2)[3];
+                    let result;
+                    let bestF;
+                    [result, bestF, steps] = yield* RBFS(best, Math.min(fLimit, alternative), h, ++steps);
+                    
+                    best[3] = bestF;
+                    if (result) {
+                        return [result, bestF, steps];
+                    }
+                }
+            }
+
+            function* aStarSearch(s0, h) {
+                let frontierMap = [];
+                let frontier = new FibonacciHeap();
+                let frontierSize = 1;
+                let explored = [];
+                let steps = 0;
+                frontierMap[s0.toString()] = frontier.insert(h(s0), initial(s0));
+
+                do {
+                    //console.log("frontier " + frontierSize);
+                    const node = frontier.extractMinimum().value;
+                    if (isGoalState(state(node))) {
+                        return [steps, node];
+                    } else if (frontierSize % 100 === 0) {
+                        yield [steps, node];
+                    }
+
+                    delete frontierMap[state(node).toString()];
+                    frontierSize--;
+                    explored[state(node).toString()] = true;
+
+                    for (const child of expand(node)) {
+                        if (!explored[state(child).toString()] && !frontierMap[state(child).toString()]) {
+                            frontierMap[state(child).toString()] = frontier.insert(h(state(child)) + cost(child), child);
+                            ++frontierSize;
+                        } else if (!explored[state(child).toString()]) {
+                            const oldNode = frontierMap[state(child).toString()];
+                            if (oldNode.key > cost(child) + h(state(child))) { // NOTE: the reason we're not simply checking only the g-cost is
+                            // that we're not updating it upon decreasing the key, so there could be instances in which we end up with a greater cost
+                            // trying to update a previous lower sum!
+                                frontier.decreaseKey(oldNode, h(state(child)) + cost(child));
+                            }
+                        }
+
+                    }
+
+                    ++steps;
+
+                } while (frontierSize != 0);
+
+                return false;
+            }
+
+        };
+
+
+        (window.setupBoard = function (boardDim) {
+            $('#arena table tr').remove();
+            for (let i = 0; i < boardDim; ++i) {
+                let row = document.createElement('tr');
+
+                for (let j = 0; j < boardDim; ++j) {
+                    let cell = document.createElement('td');
+                    cell.setAttribute('id', 't' + (i * boardDim + j));
+                    cell.setAttribute('class', 'tile');
+                    row.appendChild(cell);
+                }
+
+                $('#arena table').append(row);
+            }
+
+            window.game = new Game(boardDim);
+            game.updateTiles();
+        })(parseInt(document.getElementById('board').value));
+
+        $(document).ready(function () {
+            setInterval(() => {
+                game.updateTiles();
+            }, 100);
+        });
+        
+
+    </script>
+</head>
+
+<body>
+    <div id="canvas">
+        <header>
+            <select id="board" onchange="setupBoard(parseInt(this.value));">
+                <option value="2">2x2</option>
+                <option selected value="3">3x3</option>
+                <option value="4">4x4 (15 puzzle)</option>
+                <option value="5">5x5</option>
+                <option value="6">6x6</option>
+                <option value="7">7x7</option>
+            </select>
+            <button id="shuffle" onclick="game.startGame();">Shuffle</button>
+            <select id="heuristic">
+                <option value="0">0 (UCS)</option>
+                <option value="L0">Krivo pozicionirane (L0)</option>
+                <option selected value="L1">Manhattan (L1)</option>
+                <option value="Gaschnig">Gaschnig</option>
+                <option value="LC">Linear Conflict</option>
+                <option value="Nilsson">Nilsson</option>
+                <option value="max">Max kombinacija</option>
+            </select>
+            <button id="solve" onclick="game.solve(game.heuristics[document.getElementById('heuristic').value]);">Solve</button>
+            <button id="solveRBFS" onclick="game.solveRBFS_g(game.heuristics[document.getElementById('heuristic').value]);">Solve (RBFS)</button>
+            <p hidden class="stats">Broj koraka: <span id="steps"></span></p>
+            <p hidden class="stats">Put:</p><div hidden class="stats" id="path" style="overflow-y: scroll; height: 100px;"></div>
+        </header>
+
+        <div id="arena">
+            <table>
+                <tr>
+                    <td id="t0" class="tile"></td>
+                    <td id="t1" class="tile"></td>
+                    <td id="t2" class="tile"></td>
+                </tr>
+
+                <tr>
+                    <td id="t3" class="tile"></td>
+                    <td id="t4" class="tile"></td>
+                    <td id="t5" class="tile"></td>
+                </tr>
+
+                <tr>
+                    <td id="t6" class="tile"></td>
+                    <td id="t7" class="tile"></td>
+                    <td id="t8" class="tile"></td>
+                </tr>
+            </table>
+        </div>
+    </div>
+</body>
+
+</html>
